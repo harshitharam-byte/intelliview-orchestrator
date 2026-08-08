@@ -31,8 +31,6 @@ from config import (
     ENABLE_PROMETHEUS,
     MAX_REQUEST_BODY_BYTES,
 )
-from database.db import engine
-from database.models import Base
 from monitoring.dashboard_api import create_dashboard_routes
 from monitoring.metrics_collector import MetricsCollector
 from monitoring.websocket_manager import ws_manager
@@ -69,7 +67,6 @@ async def lifespan(app: FastAPI):
     Shutdown: best-effort graceful drain — flush the request-id log line,
     close the shared Redis client, and notify clients.
     """
-    Base.metadata.create_all(bind=engine)
     if API_TOKEN == "dev-token-change-me":
         logger.warning(
             "API_TOKEN is the built-in dev default — set a strong token "
