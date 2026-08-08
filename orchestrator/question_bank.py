@@ -81,6 +81,31 @@ class QuestionBank:
             raise
         finally:
             db.close()
+    def add_generated_questions(
+        self,
+        questions: list[dict[str, Any]],
+        category: str = "technical",
+        difficulty: str = "medium",
+    ) -> list[dict[str, Any]]:
+        """Save AI-generated questions to the question bank."""
+    
+        saved_questions = []
+    
+        for item in questions:
+            saved_question = self.add_question(
+                text=item["question"],
+                category=category,
+                difficulty=difficulty,
+                tags=["AI"],
+            )
+            saved_questions.append(saved_question)
+    
+        logger.info(
+            "Saved %s AI-generated questions to question bank",
+            len(saved_questions),
+        )
+        
+        return saved_questions
 
     def get_questions(
         self,
