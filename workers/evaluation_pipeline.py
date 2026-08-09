@@ -17,6 +17,7 @@ import json
 import logging
 import re
 from typing import Any
+from workers.question_bank import question_bank
 
 from workers.semantic_similarity import calculate_semantic_similarity
 
@@ -505,16 +506,30 @@ def _llm_generate_question(
 
         question = response.strip()
         is_valid, _reasons = validate_generated_question(question)
+
         if not question or not is_valid:
             logger.warning(
                 "LLM-generated question failed validation (rejected): %s", question
             )
             return None
 
-        return question
-    except Exception:
-        return None
+        try:
+            question_bank.add_generated_questions(
+                [{"question": question}],
+                category="technical",
+                difficulty="medium",
+            )
+            logger.info(
+                "AI-generated question saved to question bank: %s",
+                question,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to save AI-generated question to question bank: %s",
+                exc,
+            )
 
+        return question
 
 # ---------------------------------------------------------------------------
 # Hallucination detection — semantic similarity + NLI entailment,
