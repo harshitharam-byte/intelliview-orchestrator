@@ -92,8 +92,25 @@ class QuestionBank:
         saved_questions = []
     
         for item in questions:
+            text = item["question"].strip()
+    
+            db = SessionLocal()
+            try:
+                existing_question = db.execute(
+                    select(Question).where(Question.text == text)
+                ).scalar_one_or_none()
+            finally:
+                db.close()
+    
+            if existing_question:
+                logger.info(
+                    "Skipping duplicate AI-generated question: %s",
+                    text,
+                )
+                continue
+    
             saved_question = self.add_question(
-                text=item["question"],
+                text=text,
                 category=category,
                 difficulty=difficulty,
                 tags=["AI"],
@@ -104,7 +121,7 @@ class QuestionBank:
             "Saved %s AI-generated questions to question bank",
             len(saved_questions),
         )
-        
+    
         return saved_questions
 
     def get_questions(
