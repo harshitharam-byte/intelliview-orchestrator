@@ -68,6 +68,27 @@ demo: up seed ## Full one-shot: bring up the stack + seed demo data.
 
 # --- Quality -------------------------------------------------------------
 
+.PHONY: migrate
+migrate: ## Apply all pending database migrations to the latest revision.
+	$(PYTHON) scripts/migrate.py upgrade head
+
+.PHONY: migrate-revision
+migrate-revision: ## Generate a new Alembic migration revision from SQLAlchemy models.
+	@if [ -z "$(MSG)" ]; then echo "MSG is required, e.g. make migrate-revision MSG='Add foo'"; exit 1; fi
+	$(PYTHON) scripts/migrate.py revision -m "$(MSG)" --autogenerate
+
+.PHONY: migrate-downgrade
+migrate-downgrade: ## Roll back the last applied migration revision.
+	$(PYTHON) scripts/migrate.py downgrade -1
+
+.PHONY: migrate-current
+migrate-current: ## Show the current Alembic revision applied to the database.
+	$(PYTHON) scripts/migrate.py current
+
+.PHONY: migrate-history
+migrate-history: ## Show the Alembic migration history.
+	$(PYTHON) scripts/migrate.py history
+
 .PHONY: lint
 lint: ## Ruff lint + format check on the backend.
 	$(PYTHON) -m ruff check orchestrator workers monitoring database tests scripts
