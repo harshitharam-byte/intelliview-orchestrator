@@ -57,9 +57,9 @@ The project uses **Alembic** to manage database schema migrations.
 From the repository root, use:
 
 ```bash
-py -m alembic current
-py -m alembic history
-py -m alembic heads
+alembic current
+alembic history
+alembic heads
 ```
 
 - `current` shows the migration revision currently applied to the database.
@@ -80,13 +80,13 @@ docker compose up -d postgres
 Apply all pending migrations with:
 
 ```bash
-py -m alembic upgrade head
+alembic upgrade head
 ```
 
 After applying migrations, verify the current revision with:
 
 ```bash
-py -m alembic current
+alembic current
 ```
 
 ### Creating future migrations
@@ -95,7 +95,7 @@ When an intentional database schema change is required, create a new
 Alembic migration:
 
 ```bash
-py -m alembic revision --autogenerate -m "describe schema change"
+alembic revision --autogenerate -m "describe schema change"
 ```
 
 Review the generated migration carefully before applying or committing it.
@@ -105,7 +105,7 @@ to capture.
 Test the migration locally with:
 
 ```bash
-py -m alembic upgrade head
+alembic upgrade head
 ```
 
 ### Migration safety
