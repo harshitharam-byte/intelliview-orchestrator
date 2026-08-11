@@ -35,3 +35,17 @@ def test_production_aws_secrets(mock_session_class, monkeypatch):
     assert settings.postgres_host == "prod-db-cluster.aws.com"
     assert settings.postgres_user == "prod_user"
     mock_client.get_secret_value.assert_called_once_with(SecretId="test-secrets")
+
+
+def test_resolved_database_url_escapes_special_chars(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "localhost")
+    monkeypatch.setenv("POSTGRES_PORT", "5432")
+    monkeypatch.setenv("POSTGRES_DB", "ai_interview_db")
+    monkeypatch.setenv("POSTGRES_USER", "postgres")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "Umamahesh@2006")
+
+    settings = Settings()
+
+    assert settings.resolved_database_url == (
+        "postgresql://postgres:Umamahesh%402006@localhost:5432/ai_interview_db"
+    )

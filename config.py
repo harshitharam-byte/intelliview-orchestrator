@@ -7,8 +7,8 @@ should be overridden in production.
 """
 
 import json
-import os
 from functools import lru_cache
+from urllib.parse import quote_plus
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -176,9 +176,13 @@ class Settings(BaseSettings):
         if self.database_url:
             return self.database_url
 
+        user = quote_plus(self.postgres_user)
+        password = quote_plus(self.postgres_password)
+        dbname = quote_plus(self.postgres_db)
+
         base = (
-            f"postgresql://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            f"postgresql://{user}:{password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{dbname}"
         )
         if self.database_sslmode and self.database_sslmode != "disable":
             return f"{base}?sslmode={self.database_sslmode}"

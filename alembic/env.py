@@ -11,7 +11,8 @@ from database.db import Base
 config = context.config
 
 # Set the database URL from config.py
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
+# Escape % so ConfigParser does not treat URL-encoded credentials as interpolation markers.
+config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
 # Configure logging
 if config.config_file_name is not None:
