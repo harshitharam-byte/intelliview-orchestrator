@@ -28,10 +28,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Alembic migration helper for IntelliView Orchestrator",
     )
-    parser.add_argument("command", choices=["upgrade", "downgrade", "revision", "current", "history"], help="Alembic command to run")
-    parser.add_argument("revision", nargs="?", default="head", help="Revision identifier or path")
+    parser.add_argument(
+        "command",
+        choices=["upgrade", "downgrade", "revision", "current", "history"],
+        help="Alembic command to run",
+    )
+    parser.add_argument(
+        "revision", nargs="?", default="head", help="Revision identifier or path"
+    )
     parser.add_argument("-m", "--message", help="Message for revision generation")
-    parser.add_argument("--autogenerate", action="store_true", help="Autogenerate revision from models")
+    parser.add_argument(
+        "--autogenerate", action="store_true", help="Autogenerate revision from models"
+    )
 
     args = parser.parse_args()
     sys.path.insert(0, ROOT)
@@ -45,7 +53,9 @@ def main() -> int:
     elif args.command == "revision":
         if args.autogenerate and not args.message:
             parser.error("--message is required when using --autogenerate")
-        command.revision(config, message=args.message or "", autogenerate=args.autogenerate)
+        command.revision(
+            config, message=args.message or "", autogenerate=args.autogenerate
+        )
     elif args.command == "current":
         command.current(config)
     elif args.command == "history":

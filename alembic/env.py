@@ -7,7 +7,7 @@ from alembic import context
 from config import DATABASE_URL
 from database.db import Base
 
-# IMPORTANT: Import all models so SQLAlchemy registers them 
+# IMPORTANT: Import all models so SQLAlchemy registers them
 
 # Alembic Config object
 config = context.config
