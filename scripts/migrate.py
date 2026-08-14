@@ -10,8 +10,9 @@ import argparse
 import os
 import sys
 
-from alembic import command
 from alembic.config import Config
+
+from alembic import command
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
