@@ -11,6 +11,7 @@ Responsibilities:
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -21,6 +22,9 @@ from metrics.prometheus_metrics import (
     CURRENT_WORKERS,
     WORKER_ACTIVE_TASKS,
     WORKER_CAPACITY,
+    WORKER_CPU_PCT,
+    WORKER_MEMORY_PCT,
+    WORKER_QUEUE_DEPTH,
     WORKERS_HEALTHY,
     WORKERS_REGISTERED,
     WORKERS_UNHEALTHY,
@@ -101,10 +105,91 @@ class WorkerRegistry:
                     "last_heartbeat": raw.get("last_heartbeat", ""),
                     "total_tasks_processed": int(raw.get("total_tasks_processed", 0)),
                     "failed_tasks": int(raw.get("failed_tasks", 0)),
+                    "cpu_pct": float(raw.get("cpu_pct", 0.0)),
+                    "memory_pct": float(raw.get("memory_pct", 0.0)),
+                    "queue_depth": int(raw.get("queue_depth", 0)),
+                    "last_health_report": raw.get("last_health_report", ""),
                 }
             self._hydrated = True
         except Exception as exc:
             logger.warning("Could not hydrate worker registry from Redis: %s", exc)
+
+    def _trigger_sync_broadcast(self, worker_id: str, action: str = "update") -> None:
+        """Publish a sync event to Redis Pub/Sub so other cluster instances
+        can update their local worker registry."""
+        if not self.redis_client:
+            return
+        try:
+            message = json.dumps({"worker_id": worker_id, "action": action})
+            self.redis_client.publish(self.SYNC_CHANNEL, message)
+        except Exception as exc:
+            logger.warning("Failed to broadcast sync event for %s: %s", worker_id, exc)
+
+    async def _start_pubsub_listener(self) -> None:
+        """Listen for sync events from other cluster instances and update
+        the local worker registry accordingly."""
+        if not self.redis_client:
+            return
+        pubsub = None
+        try:
+            pubsub = self.redis_client.raw.pubsub()
+            await pubsub.subscribe(self.SYNC_CHANNEL)
+            logger.info(
+                "Worker Registry Pub/Sub listener started on %s", self.SYNC_CHANNEL
+            )
+            async for message in pubsub.listen():
+                if message["type"] != "message":
+                    continue
+                try:
+                    data = json.loads(message["data"])
+                    wid = data.get("worker_id")
+                    act = data.get("action")
+                    if not wid:
+                        continue
+                    if act == "deregister":
+                        with self.lock:
+                            self.local_workers.pop(wid, None)
+                    elif act == "update":
+                        raw = self.redis_client.hgetall(
+                            f"{self.WORKER_KEY_PREFIX}{wid}"
+                        )
+                        if raw:
+                            with self.lock:
+                                self.local_workers[wid] = {
+                                    "worker_id": wid,
+                                    "status": raw.get("status", "healthy"),
+                                    "active_tasks": int(raw.get("active_tasks", 0)),
+                                    "capacity": int(raw.get("capacity", 4)),
+                                    "weight": int(raw.get("weight", 4)),
+                                    "registered_at": raw.get("registered_at", ""),
+                                    "last_heartbeat": raw.get("last_heartbeat", ""),
+                                    "total_tasks_processed": int(
+                                        raw.get("total_tasks_processed", 0)
+                                    ),
+                                    "failed_tasks": int(raw.get("failed_tasks", 0)),
+                                    "failure_count": int(raw.get("failure_count", 0)),
+                                    "penalty_weight": float(
+                                        raw.get("penalty_weight", 1.0)
+                                    ),
+                                    "penalty_until": raw.get("penalty_until"),
+                                    "cpu_pct": float(raw.get("cpu_pct", 0.0)),
+                                    "memory_pct": float(raw.get("memory_pct", 0.0)),
+                                    "queue_depth": int(raw.get("queue_depth", 0)),
+                                    "last_health_report": raw.get(
+                                        "last_health_report", ""
+                                    ),
+                                }
+                except Exception as exc:
+                    logger.warning("Error processing sync event: %s", exc)
+        except Exception as exc:
+            logger.warning("Pub/Sub listener error: %s", exc)
+        finally:
+            if pubsub:
+                try:
+                    await pubsub.unsubscribe(self.SYNC_CHANNEL)
+                    await pubsub.close()
+                except Exception:
+                    pass
 
     def register_worker(
         self, worker_id: str, capacity: int = 4, weight: int | None = None
@@ -150,7 +235,7 @@ class WorkerRegistry:
                 payload = {
                     k: (
                         int(v)
-                        if isinstance(v, (int, float))
+                        if isinstance(v, int | float)
                         and k
                         in {
                             "capacity",
@@ -321,6 +406,68 @@ class WorkerRegistry:
             logger.error(f"Error processing heartbeat: {e!s}")
             return False
 
+    def report_health(
+        self,
+        worker_id: str,
+        cpu_pct: float,
+        memory_pct: float,
+        queue_depth: int,
+    ) -> bool:
+        """
+        Process a worker self-health report (CPU/memory/queue depth).
+
+        Args:
+            worker_id: Worker identifier
+            cpu_pct: Self-reported CPU utilization percent
+            memory_pct: Self-reported memory utilization percent
+            queue_depth: Self-reported queue depth
+
+        Returns:
+            bool: True if successful
+        """
+        try:
+            with self.lock:
+                if worker_id not in self.local_workers:
+                    logger.warning(
+                        f"Received health report from unknown worker: {worker_id}"
+                    )
+                    return False
+
+                self.local_workers[worker_id]["cpu_pct"] = cpu_pct
+                self.local_workers[worker_id]["memory_pct"] = memory_pct
+                self.local_workers[worker_id]["queue_depth"] = queue_depth
+                self.local_workers[worker_id]["last_health_report"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
+
+            if self.redis_client:
+                key = f"{self.WORKER_KEY_PREFIX}{worker_id}"
+                self.redis_client.hset(
+                    key,
+                    mapping={
+                        "cpu_pct": cpu_pct,
+                        "memory_pct": memory_pct,
+                        "queue_depth": queue_depth,
+                        "last_health_report": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                self._trigger_sync_broadcast(worker_id)
+
+            logger.debug(
+                f"Health report from {worker_id}: cpu={cpu_pct}% mem={memory_pct}% "
+                f"queue_depth={queue_depth}"
+            )
+
+            WORKER_CPU_PCT.labels(worker_id=worker_id).set(cpu_pct)
+            WORKER_MEMORY_PCT.labels(worker_id=worker_id).set(memory_pct)
+            WORKER_QUEUE_DEPTH.labels(worker_id=worker_id).set(queue_depth)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error processing health report: {e!s}")
+            return False
+
     def increment_active_tasks(self, worker_id: str) -> bool:
         """Increment active task count for a worker"""
         try:
@@ -364,87 +511,52 @@ class WorkerRegistry:
             logger.error(f"Error decrementing active tasks: {e!s}")
             return False
 
-        def record_failure(self, worker_id: str) -> None:
-            """
-            Record a failed task and apply a temporary penalty.
-            """
-            with self.lock:
-                worker = self.local_workers.get(worker_id)
+    def record_success(self, worker_id: str) -> None:
+        """
+        Reset penalty after successful execution.
+        """
+        with self.lock:
+            worker = self.local_workers.get(worker_id)
+            if not worker:
+                return
 
-        if not worker:
-            return None
-
-        worker["failed_tasks"] += 1
-        worker["failure_count"] += 1
-
-        # Reduce scheduling weight
-        worker["penalty_weight"] = max(0.2, worker["penalty_weight"] - 0.2)
-
-        # Penalty lasts for 60 seconds
-        worker["penalty_until"] = (
-            datetime.now(timezone.utc) + timedelta(seconds=60)
-        ).isoformat()
-
-    if self.redis_client:
-        key = f"{self.WORKER_KEY_PREFIX}{worker_id}"
-        self.redis_client.hset(
-            key,
-            mapping={
-                "failed_tasks": worker["failed_tasks"],
-                "failure_count": worker["failure_count"],
-                "penalty_weight": worker["penalty_weight"],
-                "penalty_until": worker["penalty_until"],
-            },
-        )
-
-
-def record_success(self, worker_id: str) -> None:
-    """
-    Reset penalty after successful execution.
-    """
-    with self.lock:
-        worker = self.local_workers.get(worker_id)
-        if not worker:
-            return
-
-        worker["failure_count"] = 0
-        worker["penalty_weight"] = 1.0
-        worker["penalty_until"] = None
-
-    if self.redis_client:
-        key = f"{self.WORKER_KEY_PREFIX}{worker_id}"
-        self.redis_client.hset(
-            key,
-            mapping={
-                "failure_count": 0,
-                "penalty_weight": 1.0,
-                "penalty_until": "",
-            },
-        )
-
-
-def get_worker_weight(self, worker: dict[str, Any]) -> float:
-    """
-    Return effective scheduling weight.
-    Penalized workers receive a lower weight.
-    """
-    penalty_until = worker.get("penalty_until")
-
-    if penalty_until:
-        try:
-            expiry = datetime.fromisoformat(penalty_until)
-
-            if expiry > datetime.now(timezone.utc):
-                return worker["penalty_weight"]
-
-            # Penalty expired
+            worker["failure_count"] = 0
             worker["penalty_weight"] = 1.0
             worker["penalty_until"] = None
 
-        except Exception:
-            pass
+        if self.redis_client:
+            key = f"{self.WORKER_KEY_PREFIX}{worker_id}"
+            self.redis_client.hset(
+                key,
+                mapping={
+                    "failure_count": 0,
+                    "penalty_weight": 1.0,
+                    "penalty_until": "",
+                },
+            )
 
-    return 1.0
+    def get_worker_weight(self, worker: dict[str, Any]) -> float:
+        """
+        Return effective scheduling weight.
+        Penalized workers receive a lower weight.
+        """
+        penalty_until = worker.get("penalty_until")
+
+        if penalty_until:
+            try:
+                expiry = datetime.fromisoformat(penalty_until)
+
+                if expiry > datetime.now(timezone.utc):
+                    return worker["penalty_weight"]
+
+                # Penalty expired
+                worker["penalty_weight"] = 1.0
+                worker["penalty_until"] = None
+
+            except Exception:
+                pass
+
+        return 1.0
 
     def get_worker(self, worker_id: str) -> dict[str, Any] | None:
         """Get worker details"""
@@ -466,10 +578,9 @@ def get_worker_weight(self, worker: dict[str, Any]) -> float:
         available = []
         with self.lock:
             for worker in self.local_workers.values():
-                if (
-                    worker["status"] == "healthy"
-                    and worker["active_tasks"] < worker["capacity"]
-                ):
+                if worker.get("status") == "healthy" and worker.get(
+                    "active_tasks", 0
+                ) < worker.get("capacity", 0):
                     available.append(worker)
 
         return available
@@ -568,6 +679,21 @@ def get_worker_weight(self, worker: dict[str, Any]) -> float:
                 if last_hb < timeout_threshold:
                     unhealthy.append(worker_id)
                     worker["status"] = "unhealthy"
+                WORKERS_HEALTHY.set(
+                    sum(
+                        1
+                        for w in self.local_workers.values()
+                        if w["status"] == "healthy"
+                    )
+                )
+
+                WORKERS_UNHEALTHY.set(
+                    sum(
+                        1
+                        for w in self.local_workers.values()
+                        if w["status"] == "unhealthy"
+                    )
+                )
 
         # Broadcast if status changes to unhealthy
         for wid in unhealthy:
@@ -578,16 +704,16 @@ def get_worker_weight(self, worker: dict[str, Any]) -> float:
     def record_worker_failure(self, worker_id: str):
         worker = self.local_workers.get(worker_id)
 
-    if not worker:
-        return None
+        if not worker:
+            return None
 
-    worker["failure_count"] += 1
+        worker["failure_count"] += 1
 
-    if worker["failure_count"] >= 3:
-        worker["penalty_weight"] = 0.5
-        worker["penalty_until"] = (
-            datetime.now(timezone.utc) + timedelta(minutes=5)
-        ).isoformat()
+        if worker["failure_count"] >= 3:
+            worker["penalty_weight"] = 0.5
+            worker["penalty_until"] = (
+                datetime.now(timezone.utc) + timedelta(minutes=5)
+            ).isoformat()
 
     def clear_penalty(self, worker_id: str):
         worker = self.local_workers.get(worker_id)
@@ -599,39 +725,15 @@ def get_worker_weight(self, worker: dict[str, Any]) -> float:
         worker["penalty_weight"] = 1.0
         worker["penalty_until"] = None
 
-    def get_worker_weight(self, worker):
-
-        penalty_until = worker.get("penalty_until")
-
-    if penalty_until:
-        if datetime.now(timezone.utc) > datetime.fromisoformat(penalty_until):
-            worker["penalty_weight"] = 1.0
-            worker["failure_count"] = 0
-            worker["penalty_until"] = None
-
-    return worker.get("penalty_weight", 1.0)
-
-
-def record_failure(self, worker_id: str):
-    worker = self.local_workers.get(worker_id)
-    if not worker:
-        return
-
-    worker["failure_count"] += 1
-
-    if worker["failure_count"] >= 3:
-        worker["penalty_weight"] = 0.5
-
-    def record_success(self, worker_id: str):
+    def record_failure(self, worker_id: str):
         worker = self.local_workers.get(worker_id)
         if not worker:
             return
 
-        worker["failure_count"] = 0
-        worker["penalty_weight"] = 1.0
+        worker["failure_count"] += 1
 
-    def get_worker_weight(self, worker):
-        return worker.get("penalty_weight", 1.0)
+        if worker["failure_count"] >= 3:
+            worker["penalty_weight"] = 0.5
 
     def deregister_worker(self, worker_id: str) -> bool:
         """Remove a worker from the registry"""

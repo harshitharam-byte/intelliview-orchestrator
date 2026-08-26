@@ -26,6 +26,31 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class User(Base):
+    """
+    User ORM Model
+    Represents a registered user (admin, hr, etc.) who can access the dashboard.
+    """
+
+    __tablename__ = "users"
+
+    user_id = Column(String(255), primary_key=True, index=True, nullable=False)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(50), nullable=False, default="user")
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    def __repr__(self):
+        return f"<User(user_id='{self.user_id}', email='{self.email}', role='{self.role}')>"
+
+
 class InterviewSession(Base):
     """
     InterviewSession ORM Model
@@ -78,8 +103,8 @@ class InterviewSession(Base):
     )
 
     assigned_node = Column(String(255), nullable=True)
-    start_time = Column(DateTime, nullable=True, default=utcnow)
-    end_time = Column(DateTime, nullable=True)
+    start_time = Column(DateTime(timezone=True), nullable=True, default=utcnow)
+    end_time = Column(DateTime(timezone=True), nullable=True)
 
     risk_score = Column(Float, nullable=True)
 
@@ -105,9 +130,9 @@ class InterviewSession(Base):
         index=True,
     )
 
-    created_at = Column(DateTime, nullable=False, default=utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=False,
         default=utcnow,
         onupdate=utcnow,
@@ -144,8 +169,10 @@ class Question(Base):
     usage_count = Column(Integer, nullable=False, default=0, index=True)
     avg_score = Column(Float, nullable=True, index=True)
 
-    created_at = Column(DateTime, nullable=False, default=utcnow)
-    updated_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
 
     def __repr__(self):
         return (
@@ -172,9 +199,9 @@ class Candidate(Base):
     avg_score = Column(Float, nullable=True, index=True)
     total_interviews = Column(Integer, nullable=False, default=0, index=True)
 
-    created_at = Column(DateTime, nullable=False, default=utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=False,
         default=utcnow,
         onupdate=utcnow,
@@ -205,9 +232,9 @@ class InterviewTemplate(Base):
     usage_count = Column(Integer, nullable=False, default=0, index=True)
     success_rate = Column(Float, nullable=True, index=True)
 
-    created_at = Column(DateTime, nullable=False, default=utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=False,
         default=utcnow,
         onupdate=utcnow,
@@ -220,3 +247,8 @@ class InterviewTemplate(Base):
 
     def __repr__(self):
         return f"<InterviewTemplate(template_id='{self.template_id}', name='{self.name}', type='{self.interview_type}')>"
+
+
+from database.models.interview_schedule import (  # noqa: F401
+    InterviewSchedule,
+)

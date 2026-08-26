@@ -18,6 +18,8 @@ import logging
 import re
 from typing import Any
 
+from workers.semantic_similarity import calculate_semantic_similarity
+
 logger = logging.getLogger(__name__)
 
 
@@ -502,12 +504,10 @@ def _llm_generate_question(
             return None
 
         question = response.strip()
-        is_valid, reasons = validate_generated_question(question)
-        if not is_valid:
+        is_valid, _reasons = validate_generated_question(question)
+        if not question or not is_valid:
             logger.warning(
-                "LLM-generated question rejected for session %s. Reasons: %s",
-                session_id,
-                "; ".join(reasons),
+                "LLM-generated question failed validation (rejected): %s", question
             )
             return None
 
@@ -570,6 +570,72 @@ def evaluate_hallucination(
         "is_hallucination": base >= 0.5,
         "risk_level": risk_level,
         "explanation": "Stub evaluation (models unavailable): deterministic seeded signal.",
+    }
+
+
+def score_answer(question: str, answer: str) -> dict[str, Any]:
+    """
+    Score a single candidate answer using Gemini on a 0-10 scale.
+
+    Returns:
+        {
+            "score": float,          # 0-10
+            "reasoning": str,
+            "strengths": list[str],
+            "gaps": list[str],
+        }
+    Falls back to a neutral, clearly-labeled stub if Gemini is unavailable
+    or returns invalid JSON, so this never crashes the calling endpoint.
+    """
+    prompt = (
+        "You are an expert technical interviewer. Score the candidate's answer "
+        "to the given interview question on a scale of 0 to 10.\n\n"
+        "Judge on: technical accuracy, clarity, and depth.\n\n"
+        f"Question: {question}\n\n"
+        f"Answer: {answer}\n\n"
+        "Respond with ONLY valid JSON in exactly this shape, no markdown, "
+        "no extra text:\n"
+        '{"score": <number 0-10>, "reasoning": "<1-3 sentence explanation>", '
+        '"strengths": ["<point>", ...], "gaps": ["<point>", ...]}'
+    )
+
+    try:
+        from workers.ai_client import HAS_GEMINI, gemini_generate
+
+        if HAS_GEMINI:
+            response, usage = gemini_generate(
+                prompt, temperature=0.2, max_output_tokens=512
+            )
+            logger.info(
+                "llm_token_usage provider=%s model=%s tokens=%s",
+                usage.get("provider"),
+                usage.get("model"),
+                usage.get("total_tokens"),
+            )
+            if response:
+                try:
+                    parsed = json.loads(response)
+                    score = float(parsed.get("score", 0))
+                    score = max(0.0, min(10.0, score))
+                    return {
+                        "score": round(score, 1),
+                        "reasoning": parsed.get("reasoning", ""),
+                        "strengths": parsed.get("strengths", []),
+                        "gaps": parsed.get("gaps", []),
+                    }
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    logger.error(
+                        "Invalid JSON from Gemini in score_answer: %s", response
+                    )
+    except Exception as exc:
+        logger.debug("Gemini scoring failed in score_answer: %s", exc)
+
+    # Fallback stub — keeps the endpoint working if Gemini is down/unset
+    return {
+        "score": 5.0,
+        "reasoning": ("AI scoring unavailable; returning a neutral placeholder score."),
+        "strengths": [],
+        "gaps": [],
     }
 
 
@@ -705,30 +771,98 @@ def generate_feedback(session_id: str) -> dict[str, Any]:
 
 
 def calculate_evaluation_risk_score(results: dict[str, Any]) -> float:
-    """Calculate a 0–1 risk score (inverse of performance)."""
+    """Calculate a 0–1 risk score from answer evaluation results."""
     from workers.risk_engine import RiskScoringEngine
 
+    # Fallback default values
     quality = (
         results.get("answer_quality_score", {}).get("overall_quality_score", 50) / 100.0
     )
     accuracy = results.get("technical_accuracy", {}).get("accuracy_score", 50) / 100.0
     clarity = results.get("communication_clarity", {}).get("clarity_score", 50) / 100.0
-    hallucination_score = results.get("hallucination_check", {}).get(
-        "hallucination_score", 0.0
+    hallucination_score = (
+        1.0 if results.get("hallucination_check", {}).get("is_hallucination") else 0.0
     )
 
-    quality_risk = (1 - quality) * RiskScoringEngine.EVALUATION_FACTORS[
-        "low_quality_answers"
-    ]
-    accuracy_risk = (1 - accuracy) * RiskScoringEngine.EVALUATION_FACTORS[
-        "low_accuracy"
-    ]
-    clarity_risk = (1 - clarity) * RiskScoringEngine.EVALUATION_FACTORS[
-        "poor_communication"
-    ]
-    hallucination_risk = (
-        hallucination_score * RiskScoringEngine.EVALUATION_FACTORS["hallucination"]
-    )
+    factors = RiskScoringEngine.get_evaluation_factors()
+
+    quality_risk = (1 - quality) * factors["low_quality_answers"]
+    accuracy_risk = (1 - accuracy) * factors["low_accuracy"]
+    clarity_risk = (1 - clarity) * factors["poor_communication"]
+    hallucination_risk = hallucination_score * factors["hallucination"]
 
     score = quality_risk + accuracy_risk + clarity_risk + hallucination_risk
     return round(min(score, 1.0), 3)
+
+
+def generate_summary_report(session_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Generate a comprehensive AI-written interview summary report using Gemini."""
+
+    prompt = """
+You are an expert technical interviewer.
+
+Analyze the completed interview session provided below and generate a concise,
+professional 1-page interview summary.
+
+Return ONLY valid JSON with exactly these keys:
+{
+  "overall_rating": 0,
+  "key_strengths": [],
+  "areas_for_improvement": [],
+  "hire_recommendation": "Yes",
+  "comparison_to_other_candidates": ""
+}
+
+Requirements:
+- overall_rating must be a number from 0 to 100.
+- key_strengths must contain 3 to 5 concise points.
+- areas_for_improvement must contain 2 to 4 concise points.
+- hire_recommendation must be exactly "Yes", "No", or "Maybe".
+- comparison_to_other_candidates should be a concise professional assessment
+  based only on the available session information.
+- Do not invent information that is not present in the session data.
+"""
+
+    try:
+        from workers.ai_client import HAS_GEMINI, gemini_generate
+
+        if not HAS_GEMINI:
+            logger.warning("Gemini is not available for summary report generation")
+            return None
+
+        session_text = json.dumps(session_data, default=str, indent=2)
+
+        response, usage = gemini_generate(
+            f"{prompt}\n\nCompleted Interview Session:\n{session_text}",
+            temperature=0.3,
+            max_output_tokens=1024,
+        )
+
+        if not response:
+            return None
+
+        try:
+            report = json.loads(response)
+        except json.JSONDecodeError:
+            logger.error("Invalid JSON from Gemini summary report: %s", response)
+            return None
+
+        recommendation = report.get("hire_recommendation", "Maybe")
+        if recommendation not in {"Yes", "No", "Maybe"}:
+            recommendation = "Maybe"
+
+        return {
+            "overall_rating": round(float(report.get("overall_rating", 0)), 1),
+            "key_strengths": report.get("key_strengths", []),
+            "areas_for_improvement": report.get("areas_for_improvement", []),
+            "hire_recommendation": recommendation,
+            "comparison_to_other_candidates": report.get(
+                "comparison_to_other_candidates", ""
+            ),
+            "provider": "gemini",
+            "usage": usage,
+        }
+
+    except Exception as exc:
+        logger.exception("Summary report generation failed: %s", exc)
+        return None

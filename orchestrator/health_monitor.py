@@ -19,6 +19,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import create_engine, text
+
+from config import DATABASE_URL
 from orchestrator.redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
@@ -117,7 +120,7 @@ class HealthMonitor:
     # Readiness probe (Kubernetes-style)
     # ------------------------------------------------------------------
 
-    def readiness_check(self) -> dict[str, Any]:
+    async def readiness_check(self) -> dict[str, Any]:
         """Return true readiness â€” all critical dependencies must be up.
 
         Use this for k8s readinessProbe: the service only receives
@@ -192,18 +195,29 @@ class HealthMonitor:
             logger.debug("Could not compute Redis fragmentation ratio: %s", exc)
 
         fragmentation_status = HealthStatus.HEALTHY
+        from config import get_settings
+
         if fragmentation_ratio is not None:
             if fragmentation_ratio >= self.redis_fragmentation_critical_threshold:
-                fragmentation_status = HealthStatus.CRITICAL
-                logger.error(
-                    "Redis memory fragmentation ratio critical (%s): %.2f >= %.2f "
-                    "(used_memory=%s, used_memory_rss=%s)",
-                    context,
-                    fragmentation_ratio,
-                    self.redis_fragmentation_critical_threshold,
-                    info.get("used_memory"),
-                    info.get("used_memory_rss"),
-                )
+                if get_settings().environment == "production":
+                    fragmentation_status = HealthStatus.CRITICAL
+                    logger.error(
+                        "Redis memory fragmentation ratio critical (%s): %.2f >= %.2f "
+                        "(used_memory=%s, used_memory_rss=%s)",
+                        context,
+                        fragmentation_ratio,
+                        self.redis_fragmentation_critical_threshold,
+                        info.get("used_memory"),
+                        info.get("used_memory_rss"),
+                    )
+                else:
+                    fragmentation_status = HealthStatus.DEGRADED
+                    logger.warning(
+                        "Redis memory fragmentation ratio high but ignored for non-prod (%s): %.2f >= %.2f",
+                        context,
+                        fragmentation_ratio,
+                        self.redis_fragmentation_critical_threshold,
+                    )
             elif fragmentation_ratio >= self.redis_fragmentation_warn_threshold:
                 fragmentation_status = HealthStatus.DEGRADED
                 logger.warning(
@@ -272,20 +286,15 @@ class HealthMonitor:
         dep = DependencyStatus("postgres")
         start = time.monotonic()
         try:
-            from database.db import engine
+            engine = create_engine(DATABASE_URL)
 
             with engine.connect() as conn:
-                result = conn.execute(__import__("sqlalchemy").text("SELECT 1 AS ok"))
+                result = conn.execute(text("SELECT 1"))
                 row = result.fetchone()
                 dep.healthy = row is not None and row[0] == 1
-
-                # Mark PostgreSQL as healthy in Prometheus
-                POSTGRES_HEALTH.set(1)
             dep.latency_ms = (time.monotonic() - start) * 1000
             dep.last_check = datetime.now(timezone.utc).isoformat()
         except Exception as exc:
-            # Mark PostgreSQL as unhealthy in Prometheus
-            POSTGRES_HEALTH.set(0)
             dep.healthy = False
             dep.error = str(exc)
             dep.latency_ms = (time.monotonic() - start) * 1000
@@ -495,8 +504,6 @@ class HealthMonitor:
                 self.redis_client.llen("celery_queue") if self.redis_client else 0
             )
 
-            # Update current Celery queue depth
-            QUEUE_DEPTH.set(queue_length)
             status = HealthStatus.HEALTHY
             if queue_length > self.queue_threshold:
                 status = HealthStatus.CRITICAL
@@ -529,8 +536,6 @@ class HealthMonitor:
 
             self.redis_client.ping()
 
-            # Mark Redis as healthy in Prometheus
-            REDIS_HEALTH.set(1)
             # Get Redis server information
             info = self.redis_client.info()
 
@@ -558,8 +563,6 @@ class HealthMonitor:
             }
 
         except Exception as e:
-            # Mark Redis as unhealthy in Prometheus
-            REDIS_HEALTH.set(0)
             logger.error("Error checking Redis health: %s", e)
             return {"status": HealthStatus.UNHEALTHY, "error": str(e)}
 

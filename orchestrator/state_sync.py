@@ -20,6 +20,10 @@ from sqlalchemy import select
 from database.db import SessionLocal
 from database.models import InterviewSession
 from orchestrator.redis_client import get_redis_client, is_circuit_open
+from orchestrator.session_payload import (
+    deserialize_session_payload,
+    serialize_session_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +277,9 @@ class StateSynchronizer:
 
                 if "evaluation_analysis" in session_data:
                     interview.evaluation_analysis = session_data["evaluation_analysis"]
+
+                if "feedback_generated" in session_data:
+                    interview.feedback_generated = session_data["feedback_generated"]
 
                 interview.updated_at = datetime.now(timezone.utc)
                 session_db.commit()

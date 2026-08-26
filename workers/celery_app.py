@@ -6,11 +6,15 @@ FAILED only after Celery has exhausted its retries.
 
 from celery import Celery, signals
 from kombu import Queue
+from opentelemetry.instrumentation.celery import CeleryInstrumentor
 
 from config import REDIS_URL
 from metrics.prometheus_metrics import TASKS_PERMANENTLY_FAILED
 
 celery_app = Celery("interview_tasks", broker=REDIS_URL, backend=REDIS_URL)
+EVALUATION_MAX_RETRIES = 3
+EVALUATION_RETRY_BACKOFF_BASE = 2
+EVALUATION_RETRY_BACKOFF_MAX = 60
 CeleryInstrumentor().instrument()
 
 
@@ -30,7 +34,10 @@ celery_app.conf.update(
     # Long-running interview tasks should reserve only one task at a time
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
-    # Periodic beat schedule — scan for due retries every 60 seconds
+    # All interview tasks dispatch to the "fast" queue by default (the worker
+    # consumes only "fast"/"slow"); without this the tasks land on the default
+    # "celery" queue, which no worker reads, and sessions stay QUEUED forever.
+    task_default_queue="fast",
     task_queues=(
         Queue("fast"),
         Queue("slow"),

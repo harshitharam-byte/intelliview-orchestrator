@@ -7,10 +7,9 @@ should be overridden in production.
 """
 
 import json
-import os
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -101,6 +100,20 @@ class Settings(BaseSettings):
     # --- Database SSL ---
     database_sslmode: str = "disable"
 
+    # --- Email Notification (SMTP) ---
+    smtp_host: str = "localhost"
+    smtp_port: int = 1025
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = "notifications@intelliview.ai"
+    smtp_use_tls: bool = False
+
+    # --- Google Calendar ---
+    google_calendar_enabled: bool = False
+    google_calendar_credentials_file: str = ""
+    google_calendar_token_file: str = "google_calendar_token.json"
+    google_calendar_default_calendar_id: str = "primary"
+
     @field_validator("postgres_host", "postgres_db", "postgres_user")
     @classmethod
     def validate_required_database_fields(cls, value: str) -> str:
@@ -150,6 +163,12 @@ class Settings(BaseSettings):
 
         if not self.api_token.strip():
             errors.append("API_TOKEN is required.")
+        elif self.api_token == "dev-token-change-me":
+            if self.environment.lower() == "production":
+                raise RuntimeError(
+                    "CRITICAL SECURITY ERROR: Default API_TOKEN detected! "
+                    "You MUST set a secure API_TOKEN environment variable in production."
+                )
 
         if self.worker_concurrency <= 0:
             errors.append("WORKER_CONCURRENCY must be greater than 0.")

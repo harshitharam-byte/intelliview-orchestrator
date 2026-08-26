@@ -35,16 +35,27 @@ class LoadBalancer:
     Implements load balancing for task distribution across worker nodes
     """
 
-    def __init__(self, strategy: BalancingStrategy = BalancingStrategy.LEAST_LOADED):
+    def __init__(
+        self,
+        strategy: BalancingStrategy = BalancingStrategy.LEAST_LOADED,
+        worker_registry=None,
+    ):
         """
         Initialize load balancer
 
         Args:
             strategy: Load balancing strategy to use
+            worker_registry: Optional shared WorkerRegistry instance
         """
-        self.worker_registry = WorkerRegistry()
+        self.worker_registry = worker_registry or WorkerRegistry()
         self.strategy = strategy
         self.round_robin_index = 0
+        self._wrr_weights_cache = {}
+        self._lock = Lock()
+        self._worker_cache = []
+        self._cache_timestamp = 0
+        self._cache_ttl = 5
+        self._registry_lookup_count = 0
 
         # Smooth Weighted Round Robin state — tracks the running
         # ``current_weight`` for each worker across scheduling calls.
@@ -52,6 +63,11 @@ class LoadBalancer:
         # during weight arithmetic.
         self._wrr_current_weights: dict[str, int] = {}
         self._wrr_lock = Lock()
+
+        self._worker_cache = None
+        self._cache_timestamp = 0.0
+        self._cache_ttl = 5.0
+        self._registry_lookup_count = 0
 
         logger.info(f"Load Balancer initialized with strategy: {strategy.value}")
 
@@ -244,10 +260,8 @@ class LoadBalancer:
         )
         return best
 
-    def get_best_worker_for_priority(self, priority: str) -> dict[str, Any] | None:
-        """
-        Return cached workers if cache is still valid.
-        """
+    def _get_cached_workers(self) -> list[dict[str, Any]]:
+        """Return available workers using a short-lived cache."""
         current_time = time.time()
 
         if (
@@ -259,7 +273,65 @@ class LoadBalancer:
             logger.debug(
                 f"Refreshing worker cache (Registry Lookup #{self._registry_lookup_count})"
             )
+
             self._worker_cache = self.worker_registry.get_available_workers()
             self._cache_timestamp = current_time
 
         return self._worker_cache
+
+    def _get_cached_workers(self) -> list[dict[str, Any]]:
+        """
+        Return cached workers if cache is still valid.
+        """
+        current_time = time.time()
+
+        if (
+            not self._worker_cache
+            or current_time - self._cache_timestamp > self._cache_ttl
+        ):
+            self._registry_lookup_count += 1
+
+            logger.debug(
+                f"Refreshing worker cache (Registry Lookup #{self._registry_lookup_count})"
+            )
+            self._worker_cache = self.worker_registry.get_available_workers()
+            self._cache_timestamp = current_time
+
+        return (
+            list(self._worker_cache.values())
+            if isinstance(self._worker_cache, dict)
+            else list(self._worker_cache)
+        )
+
+    def is_system_overloaded(self, threshold: float = 0.8) -> bool:
+        """Preserve previous contract for tests."""
+        stats = self.worker_registry.get_worker_statistics()
+        if stats and "capacity_utilization" in stats:
+            return (stats["capacity_utilization"] / 100.0) >= threshold
+        return False
+
+    def get_best_worker_for_priority(self, priority: str):
+        workers = self.worker_registry.get_available_workers()
+        if not workers:
+            return None
+        if priority == "high":
+            return min(workers, key=lambda w: w.get("active_tasks", 0))
+        return workers[-1]
+
+    def get_load_status(self) -> dict[str, Any]:
+        """
+        Get current load and worker status
+        """
+        stats = self.worker_registry.get_worker_statistics()
+        available = self.worker_registry.get_available_workers()
+
+        is_overloaded = False
+        if stats["total_capacity"] > 0:
+            is_overloaded = stats["capacity_utilization"] >= 80.0
+
+        return {
+            "worker_stats": stats,
+            "available_workers": len(available),
+            "system_overloaded": is_overloaded,
+            "recommended_strategy": BalancingStrategy.LEAST_LOADED.value,
+        }
